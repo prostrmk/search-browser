@@ -16,14 +16,30 @@ struct Login: Identifiable, Equatable, Hashable {
     var password: String
     /// When it was last used to sign in, if known. Newest first in lists.
     var used: Date?
+    var spaceID: String
 
-    var id: String { host + "\u{1}" + user }
+    init(host: String, user: String, password: String, used: Date? = nil, spaceID: String = Space.defaultID) {
+        self.host = host
+        self.user = user
+        self.password = password
+        self.used = used
+        self.spaceID = spaceID
+    }
+
+    var id: String { spaceID + "\u{1}" + host + "\u{1}" + user }
 }
 
 enum Vault {
     /// What every item of ours is tagged with. A test run tags its own, so a
     /// password saved while trying something never sits among the real ones.
-    private static let label = Store.world.map { "Search (\($0))" } ?? "Search"
+    private static func label(_ spaceID: String) -> String {
+        let base = Store.world.map { "Search (\($0))" } ?? "Search"
+        return spaceID == Space.defaultID ? base : "\(base) · \(spaceID)"
+    }
+
+    private static func path(_ spaceID: String) -> String? {
+        spaceID == Space.defaultID ? nil : "space:\(spaceID)"
+    }
 
     // MARK: - reading
 
@@ -35,38 +51,39 @@ enum Vault {
 
     /// What is kept for a host, exactly. See `logins(matching:)` for the
     /// version that also looks across a site's subdomains.
-    static func logins(for host: String) -> [Login] {
-        rows(where: [kSecAttrServer as String: host]).compactMap(login(from:))
+    static func logins(for host: String, spaceID: String = Space.defaultID) -> [Login] {
+        rows(where: [kSecAttrServer as String: host], spaceID: spaceID).compactMap { login(from: $0, spaceID: spaceID) }
     }
 
     /// The keychain matches a server name exactly, and a sign-in rarely lives
     /// on the page you saved it from — accounts.example.com asks, and the
     /// password was kept for example.com. So the site is matched as a site:
     /// the host first, then anything sharing its registrable domain.
-    static func logins(matching host: String) -> [Login] {
+    static func logins(matching host: String, spaceID: String = Space.defaultID) -> [Login] {
         let domain = registrable(host)
-        let exact = logins(for: host)
-        let wider = rows(where: [:])
+        let exact = logins(for: host, spaceID: spaceID)
+        let wider = rows(where: [:], spaceID: spaceID)
             .filter { ($0[kSecAttrServer as String] as? String).map { $0 != host && registrable($0) == domain } ?? false }
-            .compactMap(login(from:))
+            .compactMap { login(from: $0, spaceID: spaceID) }
         return (exact + wider).sorted { ($0.used ?? .distantPast) > ($1.used ?? .distantPast) }
     }
 
     /// Everything this app holds, for the list. Read on demand and never kept
     /// in a property.
-    static func all() -> [Login] {
-        rows(where: [:]).compactMap(login(from:))
+    static func all(spaceIDs: [String] = [Space.defaultID]) -> [Login] {
+        spaceIDs.flatMap { id in rows(where: [:], spaceID: id).compactMap { login(from: $0, spaceID: id) } }
             .sorted { $0.host == $1.host ? $0.user < $1.user : $0.host < $1.host }
     }
 
     /// The items' attributes — no secrets — narrowed by whatever is given.
-    private static func rows(where extra: [String: Any]) -> [[String: Any]] {
+    private static func rows(where extra: [String: Any], spaceID: String) -> [[String: Any]] {
         var query: [String: Any] = [
             kSecClass as String: kSecClassInternetPassword,
-            kSecAttrLabel as String: label,
+            kSecAttrLabel as String: label(spaceID),
             kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitAll,
         ]
+        if let path = path(spaceID) { query[kSecAttrPath as String] = path }
         extra.forEach { query[$0] = $1 }
         var out: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &out)
@@ -80,16 +97,18 @@ enum Vault {
     }
 
     /// One item's secret, by the two things that name it.
-    private static func secret(host: String, user: String) -> String? {
+    private static func secret(host: String, user: String, spaceID: String) -> String? {
         var out: CFTypeRef?
-        let status = SecItemCopyMatching([
+        var query: [String: Any] = [
             kSecClass as String: kSecClassInternetPassword,
-            kSecAttrLabel as String: label,
+            kSecAttrLabel as String: label(spaceID),
             kSecAttrServer as String: host,
             kSecAttrAccount as String: user,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
-        ] as CFDictionary, &out)
+        ]
+        if let path = path(spaceID) { query[kSecAttrPath as String] = path }
+        let status = SecItemCopyMatching(query as CFDictionary, &out)
         guard status == errSecSuccess, let data = out as? Data else {
             if status != errSecItemNotFound { NSLog("Vault: keychain read failed (%d)", status) }
             return nil
@@ -97,34 +116,33 @@ enum Vault {
         return String(data: data, encoding: .utf8)
     }
 
-    private static func login(from row: [String: Any]) -> Login? {
+    private static func login(from row: [String: Any], spaceID: String) -> Login? {
         guard let host = row[kSecAttrServer as String] as? String,
               let user = row[kSecAttrAccount as String] as? String,
-              let password = secret(host: host, user: user)
+              let password = secret(host: host, user: user, spaceID: spaceID)
         else { return nil }
         // The keychain has no "last used" of its own; it rides in the comment.
         let used = (row[kSecAttrComment as String] as? String)
             .flatMap(Double.init).map(Date.init(timeIntervalSince1970:))
-        return Login(host: host, user: user, password: password, used: used)
+        return Login(host: host, user: user, password: password, used: used, spaceID: spaceID)
     }
 
     // MARK: - writing
 
     @discardableResult
-    static func save(host: String, user: String, password: String, used: Date? = nil) -> Bool {
+    static func save(host: String, user: String, password: String, used: Date? = nil, spaceID: String = Space.defaultID) -> Bool {
         guard !host.isEmpty, !password.isEmpty,
               let data = password.data(using: .utf8)
         else { return false }
 
-        let identity: [String: Any] = [
+        var identity: [String: Any] = [
             kSecClass as String: kSecClassInternetPassword,
             kSecAttrServer as String: host,
             kSecAttrAccount as String: user,
+            kSecAttrLabel as String: label(spaceID),
         ]
-        var fields: [String: Any] = [
-            kSecValueData as String: data,
-            kSecAttrLabel as String: label,
-        ]
+        if let path = path(spaceID) { identity[kSecAttrPath as String] = path }
+        var fields: [String: Any] = [kSecValueData as String: data]
         if let used { fields[kSecAttrComment as String] = String(used.timeIntervalSince1970) }
 
         let status = SecItemUpdate(identity as CFDictionary, fields as CFDictionary)
@@ -138,14 +156,24 @@ enum Vault {
 
     /// It was just used to sign in. Lists put it first from now on.
     static func touch(_ login: Login) {
-        save(host: login.host, user: login.user, password: login.password, used: Date())
+        save(host: login.host, user: login.user, password: login.password, used: Date(), spaceID: login.spaceID)
     }
 
-    static func forget(host: String, user: String) {
-        SecItemDelete([
+    static func forget(host: String, user: String, spaceID: String = Space.defaultID) {
+        var query: [String: Any] = [
             kSecClass as String: kSecClassInternetPassword,
             kSecAttrServer as String: host,
             kSecAttrAccount as String: user,
+            kSecAttrLabel as String: label(spaceID),
+        ]
+        if let path = path(spaceID) { query[kSecAttrPath as String] = path }
+        SecItemDelete(query as CFDictionary)
+    }
+
+    static func remove(spaceID: String) {
+        SecItemDelete([
+            kSecClass as String: kSecClassInternetPassword,
+            kSecAttrLabel as String: label(spaceID),
         ] as CFDictionary)
     }
 

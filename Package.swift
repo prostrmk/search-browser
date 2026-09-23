@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "Search",
+    name: "search",
     platforms: [.macOS(.v14)],
     targets: [
         .executableTarget(

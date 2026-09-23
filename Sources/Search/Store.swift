@@ -52,6 +52,11 @@ enum Store {
         return WKWebsiteDataStore(forIdentifier: probeStore(1))
     }
 
+    static func websites(for space: Space) -> WKWebsiteDataStore {
+        guard let id = space.storeID else { return websites }
+        return WKWebsiteDataStore(forIdentifier: id)
+    }
+
     /// A test copy of the app under a bundle id of its own has a WebKit
     /// container of its own too, so it can use WebKit's default store and
     /// extension configuration — the ones the real browser uses, which

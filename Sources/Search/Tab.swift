@@ -19,13 +19,13 @@ enum Web {
     /// — web tabs and extension views alike (see Extensions.init).
     static let userAgentName = "Version/26.5 Safari/605.1.15"
 
-    static func configuration(shy: Bool = false) -> WKWebViewConfiguration {
+    static func configuration(shy: Bool = false, space: Space = .initial) -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
         // The real store, not the ephemeral one: staying signed in between
         // launches is the difference between a browser and a preview pane. A
         // shy tab gets its own store, which exists only while it does — its own
         // cookies, its own sign-ins, and nothing left behind when it closes.
-        config.websiteDataStore = shy ? .nonPersistent() : Store.websites
+        config.websiteDataStore = shy ? .nonPersistent() : Store.websites(for: space)
         // Chrome extensions see every page but a private one. The controller
         // has to be there when the view is made; it can't be added after.
         if #available(macOS 15.4, *), !shy { MainActor.assumeIsolated { Extensions.attach(config) } }
@@ -210,6 +210,8 @@ final class Tab: ObservableObject, Identifiable {
     /// the session or the history, and gone when the script is done.
     let bench: Bool
 
+    let spaceID: String
+
     /// The tab whose page opened this one, when a script did. Sign-in flows
     /// hand you back to it when they are done.
     var opener: Tab.ID?
@@ -254,10 +256,12 @@ final class Tab: ObservableObject, Identifiable {
         return "New Tab"
     }
 
-    init(shy: Bool = false, bench: Bool = false, configuration: WKWebViewConfiguration? = nil) {
+    init(shy: Bool = false, bench: Bool = false, spaceID: String = Space.defaultID, configuration: WKWebViewConfiguration? = nil) {
         self.shy = shy
         self.bench = bench
-        self.configuration = configuration ?? Web.configuration(shy: shy)
+        self.spaceID = spaceID
+        let space = Space(id: spaceID, name: "", storeID: spaceID == Space.defaultID ? nil : UUID(uuidString: spaceID))
+        self.configuration = configuration ?? Web.configuration(shy: shy, space: space)
     }
 
     private func build() -> PageView {
@@ -1282,5 +1286,4 @@ final class ScrollRelay: NSObject, WKScriptMessageHandler {
     })();
     """
 }
-
 

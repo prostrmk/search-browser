@@ -12,7 +12,7 @@ struct PasswordsPanel: View {
     @State private var importing: String?
 
     var body: some View {
-        Plate("Passwords", width: 620, close: { browser.managing = false }) {
+        Plate("Passwords — \(browser.spaces.active.name)", width: 620, close: { browser.managing = false }) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 10) {
                     Hunt(text: $browser.hunting, prompt: "Search sites and accounts", focus: $hunting)
