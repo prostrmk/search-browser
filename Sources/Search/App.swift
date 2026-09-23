@@ -127,6 +127,15 @@ struct SearchApp: App {
                 Button("Stop Sound in Tab") { browser.pauseMedia() }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
             }
+            CommandMenu("Spaces") {
+                ForEach(Array(browser.spaces.items.enumerated()), id: \.element.id) { index, space in
+                    Button(space.name) { browser.switchSpace(space.id) }
+                        .disabled(space.id == browser.spaces.activeID)
+                        .modifier(SpaceShortcut(index: index))
+                }
+                Divider()
+                Button("New Space…") { browser.createSpace(named: "Space \(browser.spaces.items.count + 1)") }
+            }
             CommandMenu("Bookmarks") {
                 Button("Add This Page") { browser.bookmarkCurrent() }
                     .keyboardShortcut("b", modifiers: [.command, .shift])
@@ -174,6 +183,18 @@ struct SearchApp: App {
             CommandGroup(replacing: .help) {
                 Button("Send Feedback…") { Links.writeFeedback() }
             }
+        }
+    }
+}
+
+private struct SpaceShortcut: ViewModifier {
+    let index: Int
+
+    func body(content: Content) -> some View {
+        if index < 9 {
+            content.keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: [.control, .option])
+        } else {
+            content
         }
     }
 }

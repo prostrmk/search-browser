@@ -20,6 +20,7 @@ It was built by a design studio that spends its whole day in a browser and was t
 
 - **One field.** Type an address and you go there; type words and you search. It finishes addresses from your own history and never sends what you type anywhere until you press Return.
 - **Tabs that stay out of the way.** Pin the pages you keep open all day and they shrink to a letter or their icon. Tabs from your last session come back instantly and cost nothing until you click them. `⌘K` lists your open tabs by name.
+- **Spaces.** Keep separate tab sets, cookies, saved passwords, and downloads in one window. Switch from the tab bar or sidebar, or use `⌃⌥1`–`⌃⌥9`. Route a site to a Space from the Space menu; links from other apps and pages then open there.
 - **Reading mode.** `⇧⌘R` strips a page down to the article.
 - **Hide anything, for good.** `⇧⌘H`, then click a cookie banner, a newsletter overlay, a rail of "related" nonsense — it goes, and it is still gone on that site next time, before the page has drawn a single frame.
 - **An ad blocker that runs before the page.** Third-party trackers and ad networks are stopped at the network level, so there is nothing to render and nothing to slow down. On by default, off per site if something breaks.
@@ -37,15 +38,15 @@ On purpose:
 - No extension you have to install to feel at home. Blocking ads, hiding clutter, reading mode, picture-in-picture and passwords are built in; extensions are there for everything else.
 - No sync, no account, no cloud. Your tabs, history and passwords are on your Mac and nowhere else.
 - No telemetry, no analytics, no crash reports sent anywhere. The only things that leave your Mac are the pages you ask for, their icons, and one small request a day to see whether there is a newer version.
-- One window. Tabs are the only kind of "new" there is.
+- **One window.** Spaces keep separate browsing contexts inside it.
 
 ## Privacy, concretely
 
 | What | Where it is | Who can read it |
 |---|---|---|
-| Passwords | The macOS login keychain, as ordinary keychain items tagged `Search` | Search, signed by Office Commun. Any other app triggers the system's permission dialog. |
+| Passwords | The macOS login keychain, tagged `Search` for Default and by Space for other Spaces | Search, signed by Office Commun. Any other app triggers the system's permission dialog. |
 | History, bookmarks, open tabs, hidden elements | Small JSON files in `~/Library/Application Support/Search/` | You. |
-| Cookies and site data | WebKit's own store for the app | The sites that set them, as in any browser. |
+| Cookies and site data | A persistent WebKit store for each Space | The sites that set them, as in any browser. |
 | Extensions | Unpacked in `~/Library/Application Support/Search/Extensions/`, their data in WebKit's extension store | Each extension, within the permissions you accepted when adding it. |
 | Anything else | Nowhere. There is no server. | — |
 

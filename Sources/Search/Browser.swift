@@ -32,6 +32,7 @@ final class Browser: NSObject, ObservableObject {
     /// Everything there is to set. Held here so the whole window redraws when
     /// one of them changes.
     let prefs = Preferences()
+    let spaces = Spaces()
     /// The settings panel.
     @Published var tuning = false
     /// The first-launch walk-through, over everything. Also from the menu.
@@ -269,7 +270,7 @@ final class Browser: NSObject, ObservableObject {
         guard let offer = offering else { return }
         offering = nil
         let login = offer.login
-        guard Vault.save(host: login.host, user: login.user, password: login.password, used: Date()) else {
+        guard Vault.save(host: login.host, user: login.user, password: login.password, used: Date(), spaceID: login.spaceID) else {
             announce("The keychain refused it")
             return
         }
@@ -325,10 +326,10 @@ final class Browser: NSObject, ObservableObject {
         }
     }
 
-    func relist() { saved = Vault.all() }
+    func relist() { saved = Vault.all(spaceIDs: [spaces.activeID]) }
 
     func keep(host: String, user: String, password: String) {
-        guard Vault.save(host: host, user: user, password: password) else {
+        guard Vault.save(host: host, user: user, password: password, spaceID: spaces.activeID) else {
             announce("The keychain refused it")
             return
         }
@@ -337,7 +338,7 @@ final class Browser: NSObject, ObservableObject {
     }
 
     func forget(_ login: Login) {
-        Vault.forget(host: login.host, user: login.user)
+        Vault.forget(host: login.host, user: login.user, spaceID: login.spaceID)
         relist()
     }
 
@@ -353,7 +354,7 @@ final class Browser: NSObject, ObservableObject {
         case .success(let found):
             var kept = 0
             for login in found.logins
-            where Vault.save(host: login.host, user: login.user, password: login.password, used: login.used) {
+            where Vault.save(host: login.host, user: login.user, password: login.password, used: login.used, spaceID: spaces.activeID) {
                 kept += 1
             }
             var never = Vault.never
@@ -511,7 +512,7 @@ final class Browser: NSObject, ObservableObject {
         // No dialog and no waiting cursor: the letter is taken from the
         // address and applied. Changing it is a separate act, for the day it
         // matters — which is why it is not folded into this one.
-        writeSession(now: true)
+        writeSession()
     }
 
     /// Change Letter, or a double-click on the square itself.
@@ -532,13 +533,13 @@ final class Browser: NSObject, ObservableObject {
     func endPinEdit() {
         guard editingPin != nil else { return }
         editingPin = nil
-        writeSession(now: true)
+        writeSession()
     }
 
     func unpin(_ tab: Tab) {
         if editingPin == tab.id { editingPin = nil }
         tab.pin = nil
-        defer { writeSession(now: true) }
+        defer { writeSession() }
         // Back out of the pinned block, to the head of the loose tabs.
         if let here = tabs.firstIndex(where: { $0.id == tab.id }) {
             let home = pinnedCount
@@ -625,6 +626,7 @@ final class Browser: NSObject, ObservableObject {
     var pressure: DispatchSourceMemoryPressure?
     /// Downloads still under way. See `keep(_:)`.
     var downloading: [WKDownload] = []
+    var downloadSpaces: [ObjectIdentifier: String] = [:]
     /// The Chrome Web Store's pages, told when installs come and go. See StoreRelay.swift.
     var storeWatch: AnyCancellable?
     private var hush: DispatchWorkItem?
@@ -635,6 +637,9 @@ final class Browser: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        spaces.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &bag)
         Shield.shared.enabled = prefs.shielded
         Shield.shared.compile()
         if #available(macOS 15.4, *) { Extensions.shared.start(for: self) }
@@ -714,14 +719,14 @@ final class Browser: NSObject, ObservableObject {
             watchForSleep()
         }
 
-        let saved = Session.read()
+        let saved = spaces.session(spaces.activeID)
         guard !saved.tabs.isEmpty else {
             // A blank tab costs nothing until it is asked for its page. Its
             // web view — and with it WebKit's helper processes — is built a
             // moment after the window is up, so that the first address typed
             // finds everything already running, and the first frame never
             // had to share the CPU with it.
-            let tab = Tab()
+            let tab = Tab(spaceID: spaces.activeID)
             adopt(tab)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak tab] in
                 guard let tab, tab.isBlank else { return }
@@ -731,14 +736,14 @@ final class Browser: NSObject, ObservableObject {
         }
         for entry in saved.tabs {
             guard let url = URL(string: entry.url) else { continue }
-            let tab = Tab()
+            let tab = Tab(spaceID: spaces.activeID)
             prepare(tab)
             tab.restore(url: url, title: entry.title)
             tab.pin = entry.pin
             tabs.append(tab)
         }
         guard !tabs.isEmpty else {
-            adopt(Tab())
+            adopt(Tab(spaceID: spaces.activeID))
             return
         }
         let here = min(max(0, saved.active), tabs.count - 1)
@@ -832,9 +837,8 @@ final class Browser: NSObject, ObservableObject {
         Favicons.shared.relook(tabs.filter { !$0.asleep })
     }
 
-    private func writeSession(now: Bool = false) {
-        Session.write(
-            now: now,
+    private func writeSession() {
+        spaces.save(
             .init(
                 tabs: tabs.compactMap { tab in
                     guard !tab.shy, !tab.bench else { return nil }
@@ -847,7 +851,8 @@ final class Browser: NSObject, ObservableObject {
                     return Session.Entry(url: url.absoluteString, title: tab.title, pin: tab.pin)
                 },
                 active: tabs.firstIndex { $0.id == activeID } ?? 0
-            )
+            ),
+            for: spaces.activeID
         )
     }
 
@@ -865,7 +870,61 @@ final class Browser: NSObject, ObservableObject {
     /// stops waiting: this writes straight to disk, on the thread asking to
     /// quit, before there is a process left to finish the wait on its behalf.
     func flushSession() {
-        writeSession(now: true)
+        writeSession()
+    }
+
+    var activeSpaceID: String { spaces.activeID }
+
+    func switchSpace(_ id: String) {
+        guard id != spaces.activeID, spaces.items.contains(where: { $0.id == id }) else { return }
+        flushSession()
+        land()
+        for tab in tabs { tab.close() }
+        tabs = []
+        activeID = nil
+        editing = false
+        summoning = false
+        spaces.activeID = id
+        relist()
+        restoreSpace(id)
+    }
+
+    func createSpace(named name: String) {
+        let space = spaces.create(name: name)
+        switchSpace(space.id)
+    }
+
+    func removeSpace(_ id: String) {
+        guard let space = spaces.items.first(where: { $0.id == id }), id != Space.defaultID else { return }
+        if spaces.activeID == id, let fallback = spaces.items.first(where: { $0.id != id }) {
+            switchSpace(fallback.id)
+        }
+        spaces.remove(id)
+        Vault.remove(spaceID: id)
+        let folder = Store.folder.appendingPathComponent("Downloads").appendingPathComponent(id)
+        try? FileManager.default.removeItem(at: folder)
+        Store.websites(for: space).removeData(
+            ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast
+        ) {}
+    }
+
+    private func restoreSpace(_ id: String) {
+        let saved = spaces.session(id)
+        for entry in saved.tabs {
+            guard let url = URL(string: entry.url) else { continue }
+            let tab = Tab(spaceID: id)
+            prepare(tab)
+            tab.restore(url: url, title: entry.title)
+            tab.pin = entry.pin
+            tabs.append(tab)
+        }
+        guard !tabs.isEmpty else {
+            adopt(Tab(spaceID: id))
+            return
+        }
+        let index = min(max(0, saved.active), tabs.count - 1)
+        activeID = tabs[index].id
+        tabs[index].wake()
     }
 
     // MARK: - tabs
@@ -887,7 +946,7 @@ final class Browser: NSObject, ObservableObject {
             focusRequest += 1
             return
         }
-        let tab = Tab()
+        let tab = Tab(spaceID: spaces.activeID)
         adopt(tab)
         leaving()
         activeID = tab.id
@@ -905,7 +964,7 @@ final class Browser: NSObject, ObservableObject {
     func replaceBlank(_ tab: Tab, with url: URL) {
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
         let url = Browser.page(url)
-        let page = Tab(configuration: Browser.extensionConfiguration(for: url))
+        let page = Tab(spaceID: spaces.activeID, configuration: Browser.extensionConfiguration(for: url, spaceID: spaces.activeID))
         prepare(page)
         tabs[index] = page
         page.go(to: url)
@@ -960,7 +1019,7 @@ final class Browser: NSObject, ObservableObject {
             } else {
                 newTab()
             }
-            writeSession(now: true)
+            writeSession()
             return
         }
 
@@ -968,7 +1027,7 @@ final class Browser: NSObject, ObservableObject {
             if tab.isBlank {
                 NSApp.keyWindow?.performClose(nil)
             } else {
-                let fresh = Tab()
+                let fresh = Tab(spaceID: spaces.activeID)
                 remember(tab, at: 0)
                 tab.close()
                 adopt(fresh)
@@ -1033,7 +1092,7 @@ final class Browser: NSObject, ObservableObject {
     /// One of them by name, from the History menu.
     func reopen(_ ghost: Ghost) {
         ghosts.removeAll { $0.id == ghost.id }
-        let tab = Tab()
+        let tab = Tab(spaceID: spaces.activeID)
         prepare(tab)
         leaving()
         tabs.insert(tab, at: min(ghost.index, tabs.count))
@@ -1082,7 +1141,7 @@ final class Browser: NSObject, ObservableObject {
         // An extension's own page is served only to a view built from that
         // extension's configuration.
         let url = Browser.page(url)
-        let tab = Tab(configuration: Browser.extensionConfiguration(for: url))
+        let tab = Tab(spaceID: spaces.activeID, configuration: Browser.extensionConfiguration(for: url, spaceID: spaces.activeID))
         prepare(tab)
         let here = atEnd ? nil : tabs.firstIndex { $0.id == activeID }
         tabs.insert(tab, at: here.map { $0 + 1 } ?? tabs.count)
@@ -1104,7 +1163,7 @@ final class Browser: NSObject, ObservableObject {
     /// the site: to the eye, the page went there.
     func replace(_ tab: Tab, going url: URL) {
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
-        let fresh = Tab(bench: tab.bench, configuration: Browser.extensionConfiguration(for: url))
+        let fresh = Tab(bench: tab.bench, spaceID: tab.spaceID, configuration: Browser.extensionConfiguration(for: url, spaceID: tab.spaceID))
         prepare(fresh)
         let wasActive = activeID == tab.id
         tabs[index] = fresh
@@ -1122,11 +1181,14 @@ final class Browser: NSObject, ObservableObject {
     }
 
     /// The configuration for an extension's page, or nil for anything else.
-    static func extensionConfiguration(for url: URL) -> WKWebViewConfiguration? {
+    static func extensionConfiguration(for url: URL, spaceID: String = Space.defaultID) -> WKWebViewConfiguration? {
         guard #available(macOS 15.4, *) else { return nil }
         let url = Extensions.current(url)
         guard url.scheme == Extensions.scheme else { return nil }
-        return Extensions.shared.controller.extensionContext(for: url)?.webViewConfiguration
+        guard let configuration = Extensions.shared.controller.extensionContext(for: url)?.webViewConfiguration else { return nil }
+        let space = Space(id: spaceID, name: "", storeID: spaceID == Space.defaultID ? nil : UUID(uuidString: spaceID))
+        configuration.websiteDataStore = Store.websites(for: space)
+        return configuration
     }
 
     /// A page for the bench: at the end of the row, behind whatever you are
@@ -1134,7 +1196,7 @@ final class Browser: NSObject, ObservableObject {
     @discardableResult
     func benchOpen(_ url: URL) -> Tab {
         let url = Browser.page(url)
-        let tab = Tab(bench: true, configuration: Browser.extensionConfiguration(for: url))
+        let tab = Tab(bench: true, spaceID: spaces.activeID, configuration: Browser.extensionConfiguration(for: url, spaceID: spaces.activeID))
         prepare(tab)
         tabs.append(tab)
         tab.go(to: url)
@@ -1145,6 +1207,11 @@ final class Browser: NSObject, ObservableObject {
     /// the page rather than staying behind as an empty one; otherwise the
     /// page gets a tab of its own, in front.
     func arrive(_ url: URL) {
+        if let target = spaces.target(for: url), target != spaces.activeID {
+            switchSpace(target)
+            arrive(url)
+            return
+        }
         if let active, active.isBlank, typed.isEmpty, !active.floating {
             active.go(to: url)
             editing = false
@@ -1170,7 +1237,7 @@ final class Browser: NSObject, ObservableObject {
     /// ⌘⇧N. A tab that keeps nothing — its own cookies, its own sign-ins, no
     /// history, and no place in tomorrow's session.
     func newShyTab() {
-        let tab = Tab(shy: true)
+        let tab = Tab(shy: true, spaceID: spaces.activeID)
         adopt(tab)
         leaving()
         activeID = tab.id
@@ -1303,7 +1370,7 @@ final class Browser: NSObject, ObservableObject {
             guard prefs.fillsPasswords, tab.id == activeID, pickedInto != tab.id,
                   let host = curtain.host(of: tab.address)
             else { return }
-            let known = Array(Vault.logins(matching: host).prefix(5))
+            let known = Array(Vault.logins(matching: host, spaceID: tab.spaceID).prefix(5))
             suggesting = known.isEmpty ? nil : Suggesting(tab: tab.id, spot: spot, logins: known)
         }
 
@@ -1314,14 +1381,14 @@ final class Browser: NSObject, ObservableObject {
             // A password manager extension that asked Chrome's way to do the
             // saving itself.
             if #available(macOS 15.4, *), Extensions.shared.passwordSavingTakenBy != nil { return }
-            let known = Vault.logins(for: host)
+            let known = Vault.logins(for: host, spaceID: tab.spaceID)
             // Nothing to ask about one that is already known.
             if let same = known.first(where: { $0.user == user && $0.password == password }) {
                 Vault.touch(same)
                 return
             }
             let offer = Offer(
-                login: Login(host: host, user: user, password: password, used: nil),
+                login: Login(host: host, user: user, password: password, used: nil, spaceID: tab.spaceID),
                 changed: known.contains { $0.user == user }
             )
             guard offering != offer else { return }
@@ -1622,6 +1689,14 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         // that learned it that way.
         if action.navigationType == .linkActivated,
            ["http", "https"].contains(scheme) {
+            if let target = spaces.target(for: url), target != spaces.activeID {
+                decisionHandler(.cancel)
+                DispatchQueue.main.async { [weak self] in
+                    self?.switchSpace(target)
+                    self?.arrive(url)
+                }
+                return
+            }
             let flags = action.modifierFlags
             if flags.contains(.command) || action.buttonNumber == 2 {
                 open(url, foreground: flags.contains(.shift))
@@ -1659,7 +1734,8 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
         let from = tab(for: webView)?.id ?? activeID
-        let tab = Tab(shy: tab(for: webView)?.shy ?? false, configuration: configuration)
+        let source = tab(for: webView)
+        let tab = Tab(shy: source?.shy ?? false, spaceID: source?.spaceID ?? spaces.activeID, configuration: configuration)
         adopt(tab)
         tab.opener = from
         activeID = tab.id
@@ -1684,7 +1760,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         navigationAction: WKNavigationAction,
         didBecome download: WKDownload
     ) {
-        keep(download)
+        keep(download, spaceID: tab(for: webView)?.spaceID)
     }
 
     func webView(
@@ -1692,14 +1768,15 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         navigationResponse: WKNavigationResponse,
         didBecome download: WKDownload
     ) {
-        keep(download)
+        keep(download, spaceID: tab(for: webView)?.spaceID)
     }
 
     /// Every download this window has going, heard from until it ends — and
     /// counted, so a tab still sending one to disk is never put to sleep.
-    func keep(_ download: WKDownload) {
+    func keep(_ download: WKDownload, spaceID: String? = nil) {
         download.delegate = self
         downloading.append(download)
+        downloadSpaces[ObjectIdentifier(download)] = spaceID ?? spaces.activeID
     }
 
     /// Without this WebKit refuses every request out of hand, and a page that
@@ -1857,10 +1934,13 @@ extension Browser: WKDownloadDelegate {
         let asked = response.url.flatMap { namedDownloads.removeValue(forKey: $0) }
         let name = asked ?? (suggestedFilename.isEmpty ? "download" : suggestedFilename)
 
+        let spaceID = downloadSpaces[ObjectIdentifier(download)] ?? spaces.activeID
+        let folder = downloadFolder(for: spaceID)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         guard !prefs.asksWhereToSave else {
             let panel = NSSavePanel()
             panel.nameFieldStringValue = name
-            panel.directoryURL = prefs.downloads
+            panel.directoryURL = folder
             panel.canCreateDirectories = true
             guard panel.runModal() == .OK, let url = panel.url else {
                 completionHandler(nil)
@@ -1871,12 +1951,13 @@ extension Browser: WKDownloadDelegate {
             return
         }
 
-        completionHandler(Browser.free(name, in: prefs.downloads))
+        completionHandler(Browser.free(name, in: folder))
         announce("Downloading \(name)")
     }
 
     func downloadDidFinish(_ download: WKDownload) {
         downloading.removeAll { $0 === download }
+        downloadSpaces.removeValue(forKey: ObjectIdentifier(download))
         guard let file = download.progress.fileURL else {
             announce("Download finished")
             return
@@ -1898,7 +1979,13 @@ extension Browser: WKDownloadDelegate {
         resumeData: Data?
     ) {
         downloading.removeAll { $0 === download }
+        downloadSpaces.removeValue(forKey: ObjectIdentifier(download))
         announce("Download failed")
+    }
+
+    private func downloadFolder(for id: String) -> URL {
+        guard id != Space.defaultID else { return prefs.downloads }
+        return Store.folder.appendingPathComponent("Downloads", isDirectory: true).appendingPathComponent(id, isDirectory: true)
     }
 
     /// WebKit refuses to write over a file that is already there, so the name
@@ -1916,9 +2003,3 @@ extension Browser: WKDownloadDelegate {
         return candidate
     }
 }
-
-
-
-
-
-

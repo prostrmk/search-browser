@@ -107,6 +107,7 @@ struct TabBar: View {
                     // Back, forward, reload, and the bookmarks, at the far end
                     // of the row. The dropdown hangs from the last one.
                     HStack(spacing: Metrics.tabGap) {
+                        SpaceSwitcher(browser: browser, spaces: browser.spaces, compact: true)
                         ExtensionSlot()
                         Helm(browser: browser)
                             .padding(.trailing, 8)
